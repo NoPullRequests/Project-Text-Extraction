@@ -19,12 +19,24 @@ import json
 import logging
 import re
 import uuid
+import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
-# google-generativeai handles its own imports inside the class
+try:
+    # Preferred SDK.
+    from google import genai
+    from google.genai import types
+    legacy_genai = None
+except ImportError:
+    # Installed in the current project venv; keep it working until dependencies are updated.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        import google.generativeai as legacy_genai
+    genai = None
+    types = None
 from PIL import Image
 
 # NEW: Import normalizer and schema factory
@@ -36,6 +48,67 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 8192
+DEFAULT_GEMINI_RETRY_MAX_OUTPUT_TOKENS = 16384
+
+
+def _get_int_env(name: str, default: int, min_value: int = 1) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning("Invalid %s=%r. Using default %s.", name, raw_value, default)
+        return default
+
+    if value < min_value:
+        logger.warning("%s=%s is too low. Using minimum %s.", name, value, min_value)
+        return min_value
+
+    return value
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_response_text(response) -> str:
+    response_text = getattr(response, "text", None)
+    if response_text:
+        return response_text
+
+    candidates = getattr(response, "candidates", None) or []
+    parts_text: list[str] = []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            text = getattr(part, "text", None)
+            if text:
+                parts_text.append(text)
+
+    if parts_text:
+        return "".join(parts_text)
+
+    return str(response)
+
+
+def _get_finish_reason(response) -> Optional[str]:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return None
+
+    finish_reason = getattr(candidates[0], "finish_reason", None)
+    if finish_reason is None:
+        return None
+
+    return getattr(finish_reason, "name", str(finish_reason))
 
 # ============================================================
 # PROMPTS — One per document type. Specific. No fluff.
@@ -353,6 +426,10 @@ def _parse_model_json(
     """
     log_prefix = f"[{request_id}]" if request_id else ""
     
+    logger.info(f"{log_prefix} RAW LLM RESPONSE LENGTH: {len(text)} chars")
+    logger.debug(f"{log_prefix} RAW LLM RESPONSE FULL:\n{text}")
+    logger.debug(f"{log_prefix} RAW LLM RESPONSE REPR: {repr(text)}")
+    
     # Step 1: Parse raw JSON
     cleaned = _strip_response_wrappers(text)
     candidates = [cleaned]
@@ -369,7 +446,8 @@ def _parse_model_json(
             raw_data = json.loads(candidate)
             logger.info(f"{log_prefix} Raw LLM response parsed successfully")
             break
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning(f"{log_prefix} JSON parse failed for candidate: {str(e)}")
             continue
 
     # Fallback: Try relaxed Aadhaar parsing
@@ -451,13 +529,100 @@ class BaseAIProvider(ABC):
 
 class GeminiProvider(BaseAIProvider):
     def __init__(self):
-        import google.generativeai as genai
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY not set in .env")
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
-        logger.info("GeminiProvider initialized with gemini-2.5-flash")
+        
+        self.model_name = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self.max_output_tokens = _get_int_env(
+            "GEMINI_MAX_OUTPUT_TOKENS",
+            DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
+            min_value=1024,
+        )
+        self.retry_max_output_tokens = _get_int_env(
+            "GEMINI_RETRY_MAX_OUTPUT_TOKENS",
+            max(DEFAULT_GEMINI_RETRY_MAX_OUTPUT_TOKENS, self.max_output_tokens),
+            min_value=self.max_output_tokens,
+        )
+        self.disable_thinking = _get_bool_env("GEMINI_DISABLE_THINKING", True)
+        self.sdk_name = "google-genai" if genai is not None else "google-generativeai"
+
+        if genai is not None:
+            self.client = genai.Client(api_key=api_key)
+            self.model = None
+        else:
+            legacy_genai.configure(api_key=api_key)
+            self.client = None
+            self.model = legacy_genai.GenerativeModel(self.model_name)
+
+        logger.info(
+            "GeminiProvider initialized with %s via %s (max_output_tokens=%s, "
+            "retry_max_output_tokens=%s, disable_thinking=%s)",
+            self.model_name,
+            self.sdk_name,
+            self.max_output_tokens,
+            self.retry_max_output_tokens,
+            self.disable_thinking,
+        )
+
+    def _generation_config(self, max_output_tokens: int):
+        config_kwargs = {
+            "temperature": 0.0,
+            "max_output_tokens": max_output_tokens,
+            "response_mime_type": "application/json",
+        }
+
+        if self.sdk_name == "google-generativeai":
+            return config_kwargs
+
+        if self.disable_thinking and hasattr(types, "ThinkingConfig"):
+            try:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            except Exception as exc:
+                logger.debug("Unable to configure Gemini thinking budget: %s", exc)
+
+        try:
+            return types.GenerateContentConfig(**config_kwargs)
+        except Exception:
+            config_kwargs.pop("thinking_config", None)
+            return types.GenerateContentConfig(**config_kwargs)
+
+    def _generate_content(self, contents, request_id: Optional[str] = None):
+        log_prefix = f"[{request_id}]" if request_id else ""
+
+        if self.sdk_name == "google-genai":
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=self._generation_config(self.max_output_tokens),
+            )
+        else:
+            response = self.model.generate_content(
+                contents,
+                generation_config=self._generation_config(self.max_output_tokens),
+            )
+        finish_reason = _get_finish_reason(response)
+
+        if finish_reason == "MAX_TOKENS" and self.retry_max_output_tokens > self.max_output_tokens:
+            logger.warning(
+                "%s Gemini response hit MAX_TOKENS at %s. Retrying with %s.",
+                log_prefix,
+                self.max_output_tokens,
+                self.retry_max_output_tokens,
+            )
+            if self.sdk_name == "google-genai":
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=self._generation_config(self.retry_max_output_tokens),
+                )
+            else:
+                response = self.model.generate_content(
+                    contents,
+                    generation_config=self._generation_config(self.retry_max_output_tokens),
+                )
+
+        return response
     
     def extract_from_image(
         self,
@@ -481,24 +646,38 @@ class GeminiProvider(BaseAIProvider):
             
             try:
                 logger.info(f"{log_prefix} Calling Gemini Vision for {doc_type}")
-                response = self.model.generate_content(
-                    [prompt, image],
-                    generation_config={
-                        "temperature": 0.0,
-                        "max_output_tokens": 1024,
-                        "response_mime_type": "application/json",  # Force JSON output
-                    }
-                )
+                
+                # NEW SDK: Can pass PIL Image and text directly in contents list.
+                response = self._generate_content([prompt, image], request_id)
+                
+                # Extract text from response
+                response_text = _extract_response_text(response)
+                finish_reason = _get_finish_reason(response)
+                
+                # DEBUG: Log response details
+                logger.debug(f"{log_prefix} Response type: {type(response)}")
+                logger.debug(f"{log_prefix} Response has .text: {hasattr(response, 'text')}")
+                logger.debug(f"{log_prefix} Response.text length: {len(response_text)}")
+                logger.info(f"{log_prefix} Gemini finish reason: {finish_reason or 'unknown'}")
+                logger.debug(f"{log_prefix} Response candidates: {len(response.candidates) if hasattr(response, 'candidates') else 'N/A'}")
+                if hasattr(response, 'candidates') and response.candidates:
+                    logger.debug(f"{log_prefix} First candidate parts: {len(response.candidates[0].content.parts) if hasattr(response.candidates[0], 'content') else 'N/A'}")
+                
+                if finish_reason == "MAX_TOKENS":
+                    raise ValueError(
+                        "Gemini response was truncated by MAX_TOKENS even after retry. "
+                        "Increase GEMINI_RETRY_MAX_OUTPUT_TOKENS."
+                    )
                 
                 # Validate response is not empty/bad
-                if not response or not response.text or len(response.text.strip()) < 10:
+                if not response_text or len(response_text.strip()) < 10:
                     raise ValueError("Gemini returned empty or invalid response")
                 
                 # Log raw response (truncated)
-                logger.debug(f"{log_prefix} Raw Gemini response: {response.text[:200]}...")
+                logger.debug(f"{log_prefix} Raw Gemini response: {response_text[:200]}...")
                 
                 # NEW: Parse into typed document
-                document = _parse_model_json(response.text, doc_type, request_id)
+                document = _parse_model_json(response_text, doc_type, request_id)
                 
                 # Validate result is not garbage (basic check)
                 if document.processing_status == ProcessingStatus.FAILED:
@@ -546,21 +725,25 @@ class GeminiProvider(BaseAIProvider):
             full_prompt = f"{prompt}\n\nDocument text:\n{text}"
             
             logger.info(f"{log_prefix} Calling Gemini for text extraction: {doc_type}")
-            response = self.model.generate_content(
-                full_prompt,
-                generation_config={
-                    "temperature": 0.0,
-                    "max_output_tokens": 1024,
-                    "response_mime_type": "application/json",  # Force JSON output
-                }
-            )
+            
+            response = self._generate_content(full_prompt, request_id)
+            
+            # Extract text from response
+            response_text = _extract_response_text(response)
+            finish_reason = _get_finish_reason(response)
+            logger.info(f"{log_prefix} Gemini finish reason: {finish_reason or 'unknown'}")
+            if finish_reason == "MAX_TOKENS":
+                raise ValueError(
+                    "Gemini response was truncated by MAX_TOKENS even after retry. "
+                    "Increase GEMINI_RETRY_MAX_OUTPUT_TOKENS."
+                )
             
             # Validate response
-            if not response or not response.text or len(response.text.strip()) < 10:
+            if not response_text or len(response_text.strip()) < 10:
                 raise ValueError("Gemini returned empty or invalid response")
             
             # NEW: Parse into typed document
-            document = _parse_model_json(response.text, doc_type, request_id)
+            document = _parse_model_json(response_text, doc_type, request_id)
             
             logger.info(f"{log_prefix} Gemini text extraction successful: {type(document).__name__}")
             return document
@@ -695,6 +878,7 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
     # Generate request ID at entry (correlation backbone)
     request_id = str(uuid.uuid4())
     start_time = time.time()
+    provider_errors: list[str] = []
     
     logger.info(f"[{request_id}] Starting extraction: {doc_type} from {image_path}")
     
@@ -705,7 +889,8 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
         
         # Check if extraction failed
         if document.processing_status == ProcessingStatus.FAILED:
-            raise RuntimeError("Gemini extraction returned failed status")
+            reason = getattr(document, "summary", None) or "Gemini extraction returned failed status"
+            raise RuntimeError(reason)
         
         # Build metadata
         metadata = {
@@ -715,12 +900,14 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
             "processing_time_ms": round((time.time() - start_time) * 1000, 2),
             "ocr_used": False,
             "fallback_used": False,
+            "provider_errors": provider_errors,
         }
         
         logger.info(f"[{request_id}] Extraction successful via Gemini Vision")
         return document, metadata
     
     except Exception as e:
+        provider_errors.append(f"Gemini Vision: {e}")
         logger.warning(f"[{request_id}] Gemini Vision failed: {e}. Trying OCR + Groq fallback.")
     
     # Fallback: OCR + Groq
@@ -735,7 +922,8 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
             
             # Check if extraction failed
             if document.processing_status == ProcessingStatus.FAILED:
-                raise RuntimeError("Groq extraction returned failed status")
+                reason = getattr(document, "summary", None) or "Groq extraction returned failed status"
+                raise RuntimeError(reason)
             
             # Build metadata
             metadata = {
@@ -746,6 +934,7 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
                 "ocr_used": True,
                 "ocr_confidence": ocr_confidence,
                 "fallback_used": True,
+                "provider_errors": provider_errors,
             }
             
             logger.info(f"[{request_id}] Extraction successful via Groq fallback")
@@ -754,6 +943,7 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
             raise RuntimeError("OCR text too short or empty")
     
     except Exception as e:
+        provider_errors.append(f"OCR/Groq fallback: {e}")
         logger.error(f"[{request_id}] Groq fallback also failed: {e}")
     
     # Everything failed - return failed UnknownDocument
@@ -763,7 +953,7 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
         document_type="unknown",
         data={
             "detected_document_type": doc_type,
-            "summary": "All extraction providers failed",
+            "summary": "; ".join(provider_errors) if provider_errors else "All extraction providers failed",
             "processing_status": ProcessingStatus.FAILED
         },
         request_id=request_id
@@ -776,6 +966,7 @@ def extract_document(image_path: str, doc_type: str = "unknown") -> tuple[Extrac
         "processing_time_ms": round((time.time() - start_time) * 1000, 2),
         "ocr_used": False,
         "fallback_used": True,
+        "provider_errors": provider_errors,
     }
     
     return failed_document, metadata

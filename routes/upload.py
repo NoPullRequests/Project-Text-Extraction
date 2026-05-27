@@ -22,6 +22,14 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "outputs")
 
 
+def _sanitize_upload_filename(filename: str) -> str:
+    basename = os.path.basename(filename.replace("\\", "/")).strip()
+    stem, extension = os.path.splitext(basename)
+    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in stem)
+    safe_stem = safe_stem.strip("._")[:120] or "document"
+    return f"{safe_stem}{extension.lower()}"
+
+
 @router.post("/upload", response_model=Union[DocumentResponse, TaskCreateResponse])
 async def upload_document(file: UploadFile = File(...)):
     """
@@ -38,7 +46,7 @@ async def upload_document(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
 
-    filename = file.filename
+    filename = _sanitize_upload_filename(file.filename)
     extension = os.path.splitext(filename)[1].lower()
 
     if extension not in ALLOWED_EXTENSIONS:
@@ -63,7 +71,7 @@ async def upload_document(file: UploadFile = File(...)):
     cached_result = cache_manager.get(file_hash)
     
     if cached_result:
-        if cached_result.get("error"):
+        if cached_result.get("error") or cached_result.get("processing_status") == "failed":
             logger.info(f"Cached error result found for {filename}. Invalidating cache and reprocessing.")
             cache_manager.delete(file_hash)
             cached_result = None

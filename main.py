@@ -191,6 +191,7 @@ app = FastAPI(
     version="3.0.0",
     description="AI-powered document processing with concurrent processing, caching, and hybrid extraction.",
     lifespan=lifespan,
+    debug=True,  # Enable debug mode for better error messages
 )
 
 app.add_middleware(

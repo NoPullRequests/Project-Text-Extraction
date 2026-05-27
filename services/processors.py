@@ -34,6 +34,10 @@ class BaseDocumentProcessor(ABC):
             if key.startswith('_'):
                 normalized[key] = value
                 continue
+
+            if key == 'line_items':
+                normalized[key] = value
+                continue
             
             value = normalize_nested_object(value)
             value = normalize_list(value)
@@ -259,15 +263,27 @@ class InvoiceProcessor(BaseDocumentProcessor):
             
             if isinstance(line_items, list):
                 normalized_items = []
+                aliases = {
+                    'name': 'item_name',
+                    'rate': 'unit_price',
+                    'price': 'unit_price',
+                    'amount': 'total_price',
+                    'total': 'total_price',
+                }
+                allowed_fields = {'item_name', 'description', 'quantity', 'unit_price', 'total_price'}
                 for item in line_items:
                     if isinstance(item, dict):
                         normalized_item = {}
                         for k, v in item.items():
-                            if k in ['quantity', 'unit_price', 'total_price']:
-                                normalized_item[k] = normalize_number(v)
+                            normalized_key = aliases.get(str(k).strip(), str(k).strip())
+                            if normalized_key not in allowed_fields:
+                                continue
+                            if normalized_key in ['quantity', 'unit_price', 'total_price']:
+                                normalized_item[normalized_key] = normalize_number(v)
                             else:
-                                normalized_item[k] = normalize_string(v)
-                        normalized_items.append(normalized_item)
+                                normalized_item[normalized_key] = normalize_string(v)
+                        if any(value is not None for value in normalized_item.values()):
+                            normalized_items.append(normalized_item)
                 data['line_items'] = normalized_items
             else:
                 data['line_items'] = []

@@ -75,6 +75,16 @@ def process_document_worker(file_path: str, filename: str, file_hash: str) -> di
         # Convert to dict for serialization
         result_dict = result if isinstance(result, dict) else result.model_dump(mode="json")
 
+        if result_dict.get("processing_status") == "failed":
+            summary = result_dict.get("summary") or "Document extraction failed"
+            return {
+                "error": summary,
+                "success": False,
+                "filename": filename,
+                "file_hash": file_hash,
+                "extracted_data": result_dict,
+            }
+
         if not result_dict.get("error"):
             json_output_file, download_url = _write_output_json(filename, file_hash, result_dict)
             result_dict["json_output_file"] = json_output_file

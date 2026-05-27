@@ -135,6 +135,7 @@ async def process_document(
                 "processing_time_ms": total_time_ms,
                 "fallback_used": extraction_metadata.get("fallback_used", False),
                 "ocr_used": extraction_metadata.get("ocr_used", False),
+                "provider_errors": extraction_metadata.get("provider_errors", []),
                 "post_processed": True,
             }
         }

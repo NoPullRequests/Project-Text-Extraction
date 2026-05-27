@@ -167,6 +167,22 @@ def test_invoice_processor_strategies():
     """Verify Invoice validation checks (e.g. Subtotal + GST = Total)."""
     print("🧪 Running Invoice Processor Strategy Tests...")
     
+    raw_data = {
+        "line_items": [
+            {
+                "description": "CERA STALO VIBE 1200X600MM",
+                "quantity": 25,
+                "rate": 880.00,
+                "amount": 22010.58,
+            }
+        ]
+    }
+    normalized = normalize_document_data("invoice", raw_data)
+    assert normalized["line_items"][0]["description"] == "CERA STALO VIBE 1200X600MM"
+    assert normalized["line_items"][0]["quantity"] == 25.0
+    assert normalized["line_items"][0]["unit_price"] == 880.0
+    assert normalized["line_items"][0]["total_price"] == 22010.58
+    
     # 1. Successful math validation
     invoice_ok = InvoiceDocument(
         document_id="doc_003",
