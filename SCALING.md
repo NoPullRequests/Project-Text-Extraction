@@ -1,122 +1,112 @@
-# Scaling & Future Expansion Plan
+# Scaling Plan
 
-## Current Architecture
+## Current Stack
+- **AI:** Gemini 2.5 Flash + Groq fallback
+- **OCR:** Tesseract
+- **Storage:** File-based
+- **Processing:** Async worker pool
+- **Docs:** Aadhaar, PAN, Passport, DL, Voter ID, Invoice, eKYC
 
-- AI Provider: Gemini 2.5 Flash (vision + text)
-- Fallback: Groq (text-only)
-- OCR: Tesseract
-- Storage: File-based (cache, queue, outputs)
-- Processing: Async worker pool
-- Documents: Aadhaar, PAN, Passport, Driving License, Voter ID, Invoice, eKYC
+## Enhancements
 
-## Planned Enhancements
+### 1. Face Recognition
+- **Tech:** FaceNet/ArcFace/InsightFace + OpenCV/MTCNN
+- **Use:** KYC verification, document authenticity, identity matching
 
-### 1. Face Recognition Integration
+### 2. PostgreSQL Database
+- **Replace:** File storage → Relational DB
+- **Tables:** documents (JSONB), tasks, face_embeddings (VECTOR)
+- **Stack:** PostgreSQL 15+, SQLAlchemy, Alembic, pgvector
+- **Features:** Full-text search, audit logs, analytics
 
-Add identity verification by matching document photos with live/uploaded images.
+### 3. YOLO Vision
+- **Tech:** YOLOv8/v11 + PyTorch + ONNX
+- **Detect:** Photos, signatures, text blocks, stamps
+- **Use:** Layout analysis, region extraction, multi-page handling
 
-**Implementation:**
-- Face detection: OpenCV/MTCNN
-- Embeddings: FaceNet/ArcFace/InsightFace
-- Similarity scoring and verification
+### 4. Additional Scalability Ideas
+- **Caching:** Redis for hot data, query results
+- **Queue:** RabbitMQ/Kafka for async processing
+- **CDN:** CloudFront/Cloudflare for static assets
+- **Load Balancer:** Nginx/HAProxy for traffic distribution
+- **Horizontal Scaling:** Docker + Kubernetes orchestration
+- **Monitoring:** Prometheus + Grafana for metrics
+- **Logging:** ELK Stack (Elasticsearch, Logstash, Kibana)
+- **Rate Limiting:** Token bucket for API throttling
+- **Compression:** Gzip/Brotli for response optimization
+- **Batch Processing:** Celery for background jobs
+- **Multi-region:** Deploy across AWS/GCP/Azure regions
+- **Auto-scaling:** Based on CPU/memory/queue depth
+- **Database Sharding:** Partition by document type/date
+- **Read Replicas:** PostgreSQL replicas for read-heavy ops
+- **API Gateway:** Kong/Tyk for routing, auth, rate limiting
+- **WebSockets:** Real-time progress updates
+- **GraphQL:** Flexible querying alternative to REST
+- **gRPC:** High-performance service-to-service communication
+- **Feature Flags:** LaunchDarkly for gradual rollouts
+- **A/B Testing:** Experiment with model versions
+- **ML Pipeline:** Automated retraining with new data
+- **Data Lake:** S3/GCS for raw document storage
+- **Blockchain:** Immutable audit trail for compliance
+- **Mobile SDK:** iOS/Android native libraries
+- **Edge Computing:** Process at edge for low latency
+- **Multi-tenancy:** Isolated data per organization
+- **GDPR Compliance:** Data anonymization, right to deletion
+- **Disaster Recovery:** Automated backups, failover
+- **Security:** WAF, DDoS protection, encryption at rest/transit
 
-**Use Cases:**
-- KYC verification (Aadhaar photo vs selfie)
-- Document authenticity checks
-- Multi-factor identity verification
+## Roadmap
 
-### 2. Database Integration (PostgreSQL)
-
-Replace file-based storage with relational database.
-
-**Migration Phases:**
-1. PostgreSQL for task queue and cache
-2. Store extracted data with full-text search
-3. User management, audit logs, analytics
-
-**Key Tables:**
-- documents (id, filename, file_hash, document_type, extracted_data JSONB)
-- tasks (id, document_id, status, progress, error_message)
-- face_embeddings (id, document_id, embedding VECTOR, confidence)
-
-**Tech Stack:**
-- PostgreSQL 15+
-- SQLAlchemy (ORM)
-- Alembic (migrations)
-- pgvector (embedding search)
-
-### 3. YOLO Vision Model
-
-Add object detection for document layout analysis.
-
-**Implementation:**
-- Train YOLOv8/v11 on document datasets
-- Detect regions: photo, signature, text blocks, stamps
-- Extract bounding boxes for precise field extraction
-
-**Use Cases:**
-- Crop document photos for face recognition
-- Locate signatures and stamps
-- Handle multi-page documents
-
-**Tech Stack:**
-- Ultralytics YOLOv8/v11
-- PyTorch
-- ONNX Runtime
-
-## Development Roadmap
-
-### Short-term (3-6 months)
-- Face recognition module
+### Phase 1 (3-6 months)
+- Face recognition
 - PostgreSQL migration
 - YOLO layout detection
+- Redis caching
+- Docker containerization
 
-### Mid-term (6-12 months)
-- More document types (bank statements, utility bills)
-- Multi-language support
-- Real-time WebSocket updates
-- Admin dashboard
-- API authentication (JWT)
-
-### Long-term (12+ months)
-- Blockchain verification
-- Mobile app (iOS/Android)
-- Cloud deployment (AWS/GCP/Azure)
+### Phase 2 (6-12 months)
 - Microservices architecture
-- ML model retraining pipeline
+- Kubernetes orchestration
+- More document types
+- Multi-language support
+- WebSocket updates
+- JWT authentication
+- Monitoring stack
+
+### Phase 3 (12+ months)
+- Multi-region deployment
+- Auto-scaling
+- Mobile apps
+- Blockchain verification
+- ML retraining pipeline
+- GraphQL API
+- Edge computing
 
 ## Architecture Evolution
 
-**Current:** Monolithic FastAPI app with file storage
+**Current:** Monolithic FastAPI + file storage
 
-**Future:** Microservices
-- API Gateway
+**Target:** Microservices
+- API Gateway (Kong/Tyk)
 - Document Service
-- Extraction Service (Gemini, YOLO)
+- Extraction Service (Gemini + YOLO)
 - Face Recognition Service
 - Database Service (PostgreSQL)
 - Cache Service (Redis)
+- Queue Service (RabbitMQ/Kafka)
 - Analytics Service
+- Monitoring Service
 
 ## Performance Targets
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Processing Time | 5-10s | <3s |
+| Processing | 5-10s | <3s |
 | Concurrent Users | 10-50 | 1000+ |
 | Accuracy | 85-90% | 95%+ |
 | Uptime | 95% | 99.9% |
 
-## Technology Stack
-
-**Current:**
-- Python 3.11, FastAPI, Gemini 2.5 Flash, Tesseract, File storage
-
-**Future:**
-- Python 3.12+, FastAPI + Celery, PostgreSQL + Redis, YOLOv8/v11, FaceNet/InsightFace, Docker + Kubernetes
-
 ---
 
-**Status:** Active Development  
-**Version:** 3.0.0  
-**Last Updated:** May 2026
+**Version:** 3.0.0 | **Updated:** May 2026
+
